@@ -388,3 +388,181 @@ func findDiffByPath(diffs []NormalizedDiff, path string) *NormalizedDiff {
 	}
 	return nil
 }
+
+
+// ── Empty input boundary tests (issue #1230) ─────────────────────────────────
+//
+// Empty traces (no execution states) and nil trace pointers must produce
+// deliberate, deterministic output instead of panicking. Both
+// empty-versus-empty and empty-versus-nonempty cases are covered, plus the
+// reverse (nonempty-versus-empty) and the nil-pointer edge cases.
+
+func TestCompareTracesNormalized_EmptyVsEmpty(t *testing.T) {
+	baseline := NewExecutionTrace("empty-base", 0)
+	current := NewExecutionTrace("empty-cur", 0)
+
+	config := DefaultComparisonConfig()
+	result := CompareTracesNormalized(baseline, current, "Baseline", "Current", config)
+
+	// Two empty traces are equivalent: no diffs, no regression.
+	if result.HasRegression {
+		t.Fatalf("Expected no regression for empty-vs-empty, got HasRegression=true")
+	}
+	if len(result.Diffs) != 0 {
+		t.Fatalf("Expected no diffs for empty-vs-empty, got %d", len(result.Diffs))
+	}
+
+	// Output must be deterministic: running twice produces identical results.
+	result2 := CompareTracesNormalized(baseline, current, "Baseline", "Current", config)
+	if len(result2.Diffs) != len(result.Diffs) || result2.HasRegression != result.HasRegression {
+		t.Fatalf("Empty-vs-empty comparison is not deterministic across runs")
+	}
+}
+
+func TestCompareTracesNormalized_EmptyVsNonEmpty(t *testing.T) {
+	baseline := NewExecutionTrace("empty-base", 0) // no states
+	// Current trace has enough CPU to exceed the absolute threshold (1000).
+	current := createTestTrace("non-empty-cur", 2000, 0, 5)
+
+	config := DefaultComparisonConfig()
+	result := CompareTracesNormalized(baseline, current, "Baseline", "Current", config)
+
+	// Must not panic (reaching this assertion proves it) and must produce
+	// deterministic, intentional output rather than confusing differences.
+	if len(result.Diffs) == 0 {
+		t.Fatalf("Expected diffs for empty-vs-nonempty, got none")
+	}
+
+	// CPU diff should be present and reported as critical because going from
+	// zero to non-zero CPU is a fundamental behavioural change, not "info".
+	cpuDiff := findDiffByCategory(result.Diffs, "cpu")
+	if cpuDiff == nil {
+		t.Fatalf("Expected CPU diff for empty-vs-nonempty, found none")
+	}
+	if cpuDiff.Severity != "critical" {
+		t.Fatalf("Expected critical severity for 0→N CPU change, got %s", cpuDiff.Severity)
+	}
+	if cpuDiff.Baseline != 0 {
+		t.Fatalf("Expected baseline CPU 0, got %f", cpuDiff.Baseline)
+	}
+	if cpuDiff.Current <= 0 {
+		t.Fatalf("Expected positive current CPU, got %f", cpuDiff.Current)
+	}
+
+	// Event count diff should also be present (0 → 5 states) and critical.
+	eventDiff := findDiffByCategory(result.Diffs, "events")
+	if eventDiff == nil {
+		t.Fatalf("Expected event count diff for empty-vs-nonempty, found none")
+	}
+	if eventDiff.Baseline != 0 || eventDiff.Current != 5 {
+		t.Fatalf("Expected event count 0→5, got %f→%f", eventDiff.Baseline, eventDiff.Current)
+	}
+	if eventDiff.Severity != "critical" {
+		t.Fatalf("Expected critical severity for 0→N event change, got %s", eventDiff.Severity)
+	}
+}
+
+func TestCompareTracesNormalized_NonEmptyVsEmpty(t *testing.T) {
+	// Baseline has content; current is empty. Going from something to nothing
+	// is also a fundamental change and must be reported as critical, not info.
+	baseline := createTestTrace("non-empty-base", 2000, 0, 4)
+	current := NewExecutionTrace("empty-cur", 0)
+
+	config := DefaultComparisonConfig()
+	result := CompareTracesNormalized(baseline, current, "Baseline", "Current", config)
+
+	if len(result.Diffs) == 0 {
+		t.Fatalf("Expected diffs for nonempty-vs-empty, got none")
+	}
+
+	cpuDiff := findDiffByCategory(result.Diffs, "cpu")
+	if cpuDiff == nil {
+		t.Fatalf("Expected CPU diff for nonempty-vs-empty, found none")
+	}
+	if cpuDiff.Severity != "critical" {
+		t.Fatalf("Expected critical severity for N→0 CPU change, got %s", cpuDiff.Severity)
+	}
+
+	eventDiff := findDiffByCategory(result.Diffs, "events")
+	if eventDiff == nil {
+		t.Fatalf("Expected event count diff for nonempty-vs-empty, found none")
+	}
+	if eventDiff.Current != 0 || eventDiff.Baseline != 4 {
+		t.Fatalf("Expected event count 4→0, got %f→%f", eventDiff.Baseline, eventDiff.Current)
+	}
+}
+
+func TestCompareTracesNormalized_NilBaseline_DoesNotPanic(t *testing.T) {
+	current := createTestTrace("non-empty", 2000, 0, 3)
+	config := DefaultComparisonConfig()
+
+	// Must not panic on nil baseline; should treat it as an empty trace.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("CompareTracesNormalized panicked on nil baseline: %v", r)
+		}
+	}()
+
+	result := CompareTracesNormalized(nil, current, "Baseline", "Current", config)
+	if len(result.Diffs) == 0 {
+		t.Fatalf("Expected diffs for nil-baseline-vs-nonempty, got none")
+	}
+}
+
+func TestCompareTracesNormalized_NilCurrent_DoesNotPanic(t *testing.T) {
+	baseline := createTestTrace("non-empty", 2000, 0, 3)
+	config := DefaultComparisonConfig()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("CompareTracesNormalized panicked on nil current: %v", r)
+		}
+	}()
+
+	result := CompareTracesNormalized(baseline, nil, "Baseline", "Current", config)
+	eventDiff := findDiffByCategory(result.Diffs, "events")
+	if eventDiff == nil {
+		t.Fatalf("Expected event count diff for nonempty-vs-nil, found none")
+	}
+	if eventDiff.Severity != "critical" {
+		t.Fatalf("Expected critical severity for N→0 event change, got %s", eventDiff.Severity)
+	}
+}
+
+func TestCompareTracesNormalized_BothNil_DoesNotPanic(t *testing.T) {
+	config := DefaultComparisonConfig()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("CompareTracesNormalized panicked on both nil: %v", r)
+		}
+	}()
+
+	result := CompareTracesNormalized(nil, nil, "Baseline", "Current", config)
+	if result.HasRegression {
+		t.Fatalf("Expected no regression for nil-vs-nil, got HasRegression=true")
+	}
+	if len(result.Diffs) != 0 {
+		t.Fatalf("Expected no diffs for nil-vs-nil, got %d", len(result.Diffs))
+	}
+}
+
+func TestCompareTracesNormalized_EmptyVsNonEmpty_DeterministicAcrossRuns(t *testing.T) {
+	baseline := NewExecutionTrace("empty", 0)
+	current := createTestTrace("cur", 2000, 0, 4)
+
+	config := DefaultComparisonConfig()
+	r1 := CompareTracesNormalized(baseline, current, "B", "C", config)
+	r2 := CompareTracesNormalized(baseline, current, "B", "C", config)
+
+	if r1.HasRegression != r2.HasRegression || len(r1.Diffs) != len(r2.Diffs) {
+		t.Fatalf("Empty-vs-nonempty comparison is not deterministic across runs")
+	}
+	for i := range r1.Diffs {
+		if r1.Diffs[i].Severity != r2.Diffs[i].Severity ||
+			r1.Diffs[i].Baseline != r2.Diffs[i].Baseline ||
+			r1.Diffs[i].Current != r2.Diffs[i].Current {
+			t.Fatalf("Diff %d differs between runs", i)
+		}
+	}
+}

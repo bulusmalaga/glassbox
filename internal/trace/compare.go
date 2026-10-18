@@ -50,6 +50,16 @@ type CallPathDiff struct {
 
 // CompareTraces compares two ExecutionTraces and returns a TraceDiffResult
 func CompareTraces(baseline, current *ExecutionTrace, baselineName, currentName string) *TraceDiffResult {
+	// Guard against nil traces so empty inputs produce deliberate, deterministic
+	// output instead of panicking. A nil trace is treated as an empty trace
+	// (no execution states).
+	if baseline == nil {
+		baseline = &ExecutionTrace{}
+	}
+	if current == nil {
+		current = &ExecutionTrace{}
+	}
+
 	if baselineName == "" {
 		baselineName = "Baseline"
 	}

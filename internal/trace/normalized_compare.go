@@ -86,6 +86,17 @@ func CompareTracesNormalized(baseline, current *ExecutionTrace, baselineName, cu
 		config = DefaultComparisonConfig()
 	}
 
+	// Guard against nil traces so empty inputs produce deliberate, deterministic
+	// output instead of panicking. A nil trace is treated as an empty trace
+	// (no execution states), which is the least surprising interpretation for
+	// callers that load traces from files that may be missing or malformed.
+	if baseline == nil {
+		baseline = &ExecutionTrace{}
+	}
+	if current == nil {
+		current = &ExecutionTrace{}
+	}
+
 	if baselineName == "" {
 		baselineName = "Baseline"
 	}
@@ -150,7 +161,10 @@ func compareCPU(baseline, current *ExecutionTrace, config *ComparisonConfig) []N
 		percentDelta = (float64(delta) / float64(baselineCPU)) * 100
 	}
 
-	severity := determineSeverity(percentDelta, config.CPUThresholdPct, delta > 0)
+	severity := determineEmptyEdgeSeverity(float64(baselineCPU), float64(currentCPU))
+	if severity == "" {
+		severity = determineSeverity(percentDelta, config.CPUThresholdPct, delta > 0)
+	}
 
 	path := "total_cpu_instructions"
 	reason := fmt.Sprintf("CPU instructions changed from %d to %d", baselineCPU, currentCPU)
@@ -193,7 +207,10 @@ func compareMemory(baseline, current *ExecutionTrace, config *ComparisonConfig) 
 		percentDelta = (float64(delta) / float64(baselineMem)) * 100
 	}
 
-	severity := determineSeverity(percentDelta, config.MemoryThresholdPct, delta > 0)
+	severity := determineEmptyEdgeSeverity(float64(baselineMem), float64(currentMem))
+	if severity == "" {
+		severity = determineSeverity(percentDelta, config.MemoryThresholdPct, delta > 0)
+	}
 
 	path := "total_memory_bytes"
 	reason := fmt.Sprintf("Memory usage changed from %d to %d bytes", baselineMem, currentMem)
@@ -300,7 +317,10 @@ func compareEventCounts(baseline, current *ExecutionTrace, config *ComparisonCon
 			percentDelta = (float64(delta) / float64(baselineCount)) * 100
 		}
 
-		severity := determineSeverity(percentDelta, config.EventCountThresholdPct, delta > 0)
+		severity := determineEmptyEdgeSeverity(float64(baselineCount), float64(currentCount))
+		if severity == "" {
+			severity = determineSeverity(percentDelta, config.EventCountThresholdPct, delta > 0)
+		}
 
 		diffs = append(diffs, NormalizedDiff{
 			Category:      "events",
@@ -440,6 +460,24 @@ func determineSeverity(percentDelta, threshold float64, isIncrease bool) string 
 		}
 	}
 	return "info"
+}
+
+// determineEmptyEdgeSeverity returns a non-empty severity string when one side
+// of a numeric comparison is empty (zero) and the other is not. Going from
+// "nothing" to "something" (or the reverse) is a fundamental behavioural
+// change and is reported as "critical" rather than the misleading "info"
+// severity that results from a 0% delta computed against a zero baseline.
+//
+// Returns "" when neither side is empty so callers fall back to the standard
+// determineSeverity logic.
+func determineEmptyEdgeSeverity(baseline, current float64) string {
+	if baseline == 0 && current > 0 {
+		return "critical"
+	}
+	if baseline > 0 && current == 0 {
+		return "critical"
+	}
+	return ""
 }
 
 func calculateSummary(diffs []NormalizedDiff, config *ComparisonConfig) ComparisonSummary {
